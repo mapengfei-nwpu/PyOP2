@@ -692,7 +692,7 @@ class Mat(base.Mat):
 
     @utils.cached_property
     def _kernel_args_(self):
-        return (self.handle.handle, )
+        return tuple(a.handle.handle for a in self)
 
     @collective
     def _init(self):

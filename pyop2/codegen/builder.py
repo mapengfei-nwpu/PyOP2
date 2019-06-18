@@ -8,7 +8,7 @@ from pyop2.codegen.representation import (Index, FixedIndex, RuntimeIndex,
                                           Argument, Literal, NamedLiteral,
                                           Materialise, Accumulate, FunctionCall, When,
                                           Symbol, Zero, Sum, Min, Max, Product)
-from pyop2.codegen.representation import (PackInst, UnpackInst, KernelInst)
+from pyop2.codegen.representation import (PackInst, UnpackInst, KernelInst, PreUnpackInst)
 
 from pyop2.utils import cached_property
 from pyop2.datatypes import IntType
@@ -344,9 +344,8 @@ class MatPack(Pack):
         self.dtype = dtype
         self.interior_horizontal = interior_horizontal
 
-    def pack(self, loop_indices=None):
-        if hasattr(self, "_pack"):
-            return self._pack
+    @cached_property
+    def shapes(self):
         ((rdim, cdim), ), = self.dims
         rmap, cmap = self.maps
         if self.interior_horizontal:
@@ -355,9 +354,14 @@ class MatPack(Pack):
             shape = (1, )
         rshape = shape + rmap.shape[1:] + (rdim, )
         cshape = shape + cmap.shape[1:] + (cdim, )
+        return (rshape, cshape)
+
+    def pack(self, loop_indices=None):
+        if hasattr(self, "_pack"):
+            return self._pack
         if self.access in {WRITE, INC}:
             val = Zero((), self.dtype)
-            multiindex = MultiIndex(*(Index(e) for e in (rshape + cshape)))
+            multiindex = MultiIndex(*(Index(e) for e in itertools.chain(*self.shapes)))
             pack = Materialise(PackInst(), val, multiindex)
             self._pack = pack
             return pack
@@ -422,6 +426,89 @@ class MatPack(Pack):
                             access)
 
         yield call
+
+
+class MixedMatPack(Pack):
+
+    insertion_names = {False: "MatSetValuesBlockedLocal",
+                       True: "MatSetValuesLocal"}
+    """Function call name for inserting into the PETSc Mat. The keys
+       are whether or not maps are "unrolled" (addressing dofs) or
+       blocked (addressing nodes)."""
+
+    def __init__(self, packs, access, dtype, block_shape, interior_horizontal=False):
+        self.access = access
+        assert len(block_shape) == 2
+        self.packs = numpy.asarray(packs).reshape(block_shape)
+        self.dtype = dtype
+        self.interior_horizontal = interior_horizontal
+
+    def pack(self, loop_indices=None):
+        if hasattr(self, "_pack"):
+            return self._pack
+        if self.interior_horizontal:
+            shape = (2, )
+        else:
+            shape = (1, )
+        rshape = 0
+        cshape = 0
+        # Need to compute row and col shape based on individual pack shapes
+        for p in self.packs[:, 0]:
+            shape, _ = p.shapes
+            rshape += numpy.prod(shape, dtype=int)
+        for p in self.packs[0, :]:
+            _, shape = p.shapes
+            cshape += numpy.prod(shape, dtype=int)
+        shape = (rshape, cshape)
+        print(shape)
+        if self.access in {WRITE, INC}:
+            val = Zero((), self.dtype)
+            multiindex = MultiIndex(*(Index(e) for e in shape))
+            pack = Materialise(PackInst(), val, multiindex)
+            self._pack = pack
+            return pack
+        else:
+            raise ValueError("Unexpected access type")
+
+    def kernel_arg(self, loop_indices=None):
+        pack = self.pack(loop_indices=loop_indices)
+        return Indexed(pack, tuple(Index(e) for e in pack.shape))
+
+    def emit_unpack_instruction(self, *,
+                                loop_indices=None):
+        pack = self.pack(loop_indices=loop_indices)
+        mixed_to_local = []
+        local_to_global = []
+        roffset = 0
+        for row in self.packs:
+            coffset = 0
+            for p in row:
+                rshape, cshape = p.shapes
+                pack_ = p.pack(loop_indices=loop_indices)
+                rindices = tuple(Index(e) for e in rshape)
+                cindices = tuple(Index(e) for e in cshape)
+                indices = MultiIndex(*rindices, *cindices)
+                lvalue = Indexed(pack_, indices)
+                rextents = [numpy.prod(rshape[i+1:], dtype=numpy.int32) for i in range(len(rshape))]
+                cextents = [numpy.prod(cshape[i+1:], dtype=numpy.int32) for i in range(len(cshape))]
+                flat_row_index = reduce(Sum, [Product(i, Literal(IntType.type(e), casting=False))
+                                              for i, e in zip(rindices, rextents)],
+                                        Literal(IntType.type(0), casting=False))
+                flat_col_index = reduce(Sum, [Product(i, Literal(IntType.type(e), casting=False))
+                                              for i, e in zip(cindices, cextents)],
+                                        Literal(IntType.type(0), casting=False))
+
+                flat_index = MultiIndex(Sum(flat_row_index, Literal(IntType.type(roffset), casting=False)),
+                                        Sum(flat_col_index, Literal(IntType.type(coffset), casting=False)))
+                rvalue = Indexed(pack, flat_index)
+                # Copy from local mixed element tensor into non-mixed
+                mixed_to_local.append(Accumulate(PreUnpackInst(), lvalue, rvalue))
+                # And into global matrix.
+                local_to_global.extend(p.emit_unpack_instruction(loop_indices=loop_indices))
+                coffset += numpy.prod(cshape, dtype=numpy.int32)
+            roffset += numpy.prod(rshape, dtype=numpy.int32)
+        yield from iter(mixed_to_local)
+        yield from iter(local_to_global)
 
 
 class WrapperBuilder(object):
@@ -577,36 +664,57 @@ class WrapperBuilder(object):
                 pack = MixedDatPack(packs, arg.access, arg.dtype, interior_horizontal=interior_horizontal)
                 self.packed_args.append(pack)
                 self.argument_accesses.append(arg.access)
-                return
-            if arg._is_dat_view:
-                view_index = arg.data.index
-                data = arg.data._parent
             else:
-                view_index = None
-                data = arg.data
-            shape = (None, *data.shape[1:])
-            argument = Argument(shape,
-                                arg.data.dtype,
-                                pfx="dat")
-            pack = arg.data.pack(argument, arg.access, self.map_(arg.map, unroll=arg.unroll_map),
-                                 interior_horizontal=interior_horizontal,
-                                 view_index=view_index)
+                if arg._is_dat_view:
+                    view_index = arg.data.index
+                    data = arg.data._parent
+                else:
+                    view_index = None
+                    data = arg.data
+                shape = (None, *data.shape[1:])
+                argument = Argument(shape,
+                                    arg.data.dtype,
+                                    pfx="dat")
+                pack = arg.data.pack(argument, arg.access, self.map_(arg.map, unroll=arg.unroll_map),
+                                     interior_horizontal=interior_horizontal,
+                                     view_index=view_index)
+                self.arguments.append(argument)
+                self.packed_args.append(pack)
+                self.argument_accesses.append(arg.access)
         elif arg._is_global:
             argument = Argument(arg.data.dim,
                                 arg.data.dtype,
                                 pfx="glob")
             pack = GlobalPack(argument, arg.access)
+            self.arguments.append(argument)
+            self.packed_args.append(pack)
+            self.argument_accesses.append(arg.access)
         elif arg._is_mat:
-            argument = Argument((), PetscMat(), pfx="mat")
-            map_ = tuple(self.map_(m, unroll=arg.unroll_map) for m in arg.map)
-            pack = arg.data.pack(argument, arg.access, map_,
-                                 arg.data.dims, arg.data.dtype,
-                                 interior_horizontal=interior_horizontal)
+            if arg._is_mixed:
+                packs = []
+                for a in arg:
+                    argument = Argument((), PetscMat(), pfx="mat")
+                    map_ = tuple(self.map_(m, unroll=arg.unroll_map) for m in a.map)
+                    packs.append(arg.data.pack(argument, a.access, map_,
+                                               a.data.dims, a.data.dtype,
+                                               interior_horizontal=interior_horizontal))
+                    self.arguments.append(argument)
+                pack = MixedMatPack(packs, arg.access, arg.dtype,
+                                    arg.data.sparsity.shape,
+                                    interior_horizontal=interior_horizontal)
+                self.packed_args.append(pack)
+                self.argument_accesses.append(arg.access)
+            else:
+                argument = Argument((), PetscMat(), pfx="mat")
+                map_ = tuple(self.map_(m, unroll=arg.unroll_map) for m in arg.map)
+                pack = arg.data.pack(argument, arg.access, map_,
+                                     arg.data.dims, arg.data.dtype,
+                                     interior_horizontal=interior_horizontal)
+                self.arguments.append(argument)
+                self.packed_args.append(pack)
+                self.argument_accesses.append(arg.access)
         else:
             raise ValueError("Unhandled argument type")
-        self.arguments.append(argument)
-        self.packed_args.append(pack)
-        self.argument_accesses.append(arg.access)
 
     def map_(self, map_, unroll=False):
         if map_ is None:
