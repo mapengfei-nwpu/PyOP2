@@ -29,7 +29,7 @@ from pyop2.codegen.representation import (Index, FixedIndex, RuntimeIndex,
                                           Materialise, Accumulate, FunctionCall, When,
                                           Argument, Variable, Literal, NamedLiteral,
                                           Symbol, Zero, Sum, Min, Max, Product)
-from pyop2.codegen.representation import (PackInst, UnpackInst, KernelInst)
+from pyop2.codegen.representation import (PackInst, UnpackInst, KernelInst, PreUnpackInst)
 from pytools import ImmutableRecord
 
 
@@ -311,9 +311,14 @@ def instruction_dependencies(instructions, initialisers):
     for op in instructions_by_type[KernelInst]:
         deps[op] |= frozenset(names[o] for o in instructions_by_type[PackInst])
 
+    # These are used in mixed mat unpacking
+    for op in instructions_by_type[PreUnpackInst]:
+        deps[op] |= frozenset(names[o] for o in instructions_by_type[KernelInst])
+
     # unpacking instructions depends on kernel instructions
     for op in instructions_by_type[UnpackInst]:
-        deps[op] |= frozenset(names[o] for o in instructions_by_type[KernelInst])
+        deps[op] |= frozenset(names[o] for o in itertools.chain(instructions_by_type[KernelInst],
+                                                                instructions_by_type[PreUnpackInst]))
 
     # add sequential instructions in the initialisers
     for inits in initialisers:
@@ -322,8 +327,7 @@ def instruction_dependencies(instructions, initialisers):
                 deps[p] |= frozenset(names[c] for c in imperatives(inits[:i])) - frozenset([name])
 
     # add name to deps
-    deps = dict((op, (names[op], dep)) for op, dep in deps.items())
-    return deps
+    return dict((op, (names[op], dep)) for op, dep in deps.items())
 
 
 def generate(builder, wrapper_name=None):
