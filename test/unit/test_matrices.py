@@ -890,14 +890,12 @@ class TestMixedMatrices:
     def mat(self, msparsity, mmap, mdat):
         mat = op2.Mat(msparsity)
 
-        code = c_for("i", 3,
-                     c_for("j", 3,
-                           Incr(Symbol("v", ("i", "j")), FlatBlock("d[i][0] * d[j][0]"))))
-        addone = FunDecl("void", "addone_mat",
-                         [Decl("double", Symbol("v", (3, 3))),
-                          Decl("double", c_sym("**d"))],
-                         Block([code], open_scope=False),
-                         pred=["static"])
+
+        addone = """static void addone_mat(double v[9], double d[3]) {
+            for (int i = 0; i < 3; i++)
+               for (int j = 0; j < 3; j++)
+                  v[i*3 + j] += d[i]*d[j];
+        }"""
 
         addone = op2.Kernel(addone, "addone_mat")
         op2.par_loop(addone, mmap.iterset,
