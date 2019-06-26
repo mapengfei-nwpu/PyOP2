@@ -3539,7 +3539,7 @@ class ParLoop(object):
 
     @cached_property
     def _parloop_event(self):
-        return timed_region("ParLoopExecute")
+        return timed_region("ParLoopExecute_" + (self.kernel.cache_key if self.kernel.cache_key else "null"))
 
     @collective
     def compute(self):
