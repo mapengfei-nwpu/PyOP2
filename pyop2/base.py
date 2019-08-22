@@ -555,8 +555,6 @@ class Set(object):
     Halo send/receive data is stored on sets in a :class:`Halo`.
     """
 
-    _globalcount = 0
-
     _CORE_SIZE = 0
     _OWNED_SIZE = 1
     _GHOST_SIZE = 2
@@ -580,12 +578,11 @@ class Set(object):
         assert size[Set._CORE_SIZE] <= size[Set._OWNED_SIZE] <= \
             size[Set._GHOST_SIZE], "Set received invalid sizes: %s" % size
         self._sizes = size
-        self._name = name or "set_%d" % Set._globalcount
+        self._name = name or "set_#x%x" % id(self)
         self._halo = halo
         self._partition_size = 1024
         # A cache of objects built on top of this set
         self._cache = {}
-        Set._globalcount += 1
 
     @cached_property
     def core_size(self):
@@ -1074,7 +1071,6 @@ class DataSet(ObjectCached):
 
     Set used in the op2.Dat structures to specify the dimension of the data.
     """
-    _globalcount = 0
 
     @validate_type(('iter_set', Set, SetTypeError),
                    ('dim', (numbers.Integral, tuple, list), DimTypeError),
@@ -1089,8 +1085,7 @@ class DataSet(ObjectCached):
         self._set = iter_set
         self._dim = as_tuple(dim, numbers.Integral)
         self._cdim = np.prod(self._dim).item()
-        self._name = name or "dset_%d" % DataSet._globalcount
-        DataSet._globalcount += 1
+        self._name = name or "dset_#x%x" % id(self)
         self._initialized = True
 
     @classmethod
@@ -1167,7 +1162,6 @@ class DataSet(ObjectCached):
 class GlobalDataSet(DataSet):
     """A proxy :class:`DataSet` for use in a :class:`Sparsity` where the
     matrix has :class:`Global` rows or columns."""
-    _globalcount = 0
 
     def __init__(self, global_):
         """
@@ -1525,13 +1519,12 @@ class Dat(DataCarrier, _EmptyDataMixin):
         from pyop2.codegen.builder import DatPack
         return DatPack
 
-    _globalcount = 0
     _modes = [READ, WRITE, RW, INC, MIN, MAX]
 
     @validate_type(('dataset', (DataCarrier, DataSet, Set), DataSetTypeError),
                    ('name', str, NameTypeError))
     @validate_dtype(('dtype', None, DataTypeError))
-    def __init__(self, dataset, data=None, dtype=None, name=None, uid=None):
+    def __init__(self, dataset, data=None, dtype=None, name=None):
 
         if isinstance(dataset, Dat):
             self.__init__(dataset.dataset, None, dtype=dataset.dtype,
@@ -1548,14 +1541,7 @@ class Dat(DataCarrier, _EmptyDataMixin):
         self._dataset = dataset
         self.comm = dataset.comm
         self.halo_valid = True
-        # If the uid is not passed in from outside, assume that Dats
-        # have been declared in the same order everywhere.
-        if uid is None:
-            self._id = Dat._globalcount
-            Dat._globalcount += 1
-        else:
-            self._id = uid
-        self._name = name or "dat_%d" % self._id
+        self._name = name or "dat_#x%x" % id(self)
 
     @cached_property
     def _kernel_args_(self):
@@ -2439,7 +2425,6 @@ class Global(DataCarrier, _EmptyDataMixin):
         initialised to be zero.
     """
 
-    _globalcount = 0
     _modes = [READ, INC, MIN, MAX]
 
     @validate_type(('name', str, NameTypeError))
@@ -2454,9 +2439,8 @@ class Global(DataCarrier, _EmptyDataMixin):
         self._cdim = np.prod(self._dim).item()
         _EmptyDataMixin.__init__(self, data, dtype, self._dim)
         self._buf = np.empty(self.shape, dtype=self.dtype)
-        self._name = name or "global_%d" % Global._globalcount
+        self._name = name or "global_#x%x" % id(self)
         self.comm = comm
-        Global._globalcount += 1
 
     @cached_property
     def _kernel_args_(self):
@@ -2694,8 +2678,6 @@ class Map(object):
       map result will be passed to the kernel.
     """
 
-    _globalcount = 0
-
     dtype = IntType
 
     @validate_type(('iterset', Set, SetTypeError), ('toset', Set, SetTypeError),
@@ -2709,14 +2691,13 @@ class Map(object):
                                       (iterset.total_size, arity),
                                       allow_none=True)
         self.shape = (iterset.total_size, arity)
-        self._name = name or "map_%d" % Map._globalcount
+        self._name = name or "map_#x%x" % id(self)
         if offset is None or len(offset) == 0:
             self._offset = None
         else:
             self._offset = verify_reshape(offset, IntType, (arity, ))
         # A cache for objects built on top of this map
         self._cache = {}
-        Map._globalcount += 1
 
     @cached_property
     def _kernel_args_(self):
@@ -3027,8 +3008,7 @@ class Sparsity(ObjectCached):
             raise ValueError("Haven't thought hard enough about different left and right communicators")
         self.comm = self.lcomm
 
-        self._name = name or "sparsity_%d" % Sparsity._globalcount
-        Sparsity._globalcount += 1
+        self._name = name or "sparsity_#x%x" % id(self)
 
         self.iteration_regions = iteration_regions
         # If the Sparsity is defined on MixedDataSets, we need to build each
@@ -3065,7 +3045,6 @@ class Sparsity(ObjectCached):
         self._initialized = True
 
     _cache = {}
-    _globalcount = 0
 
     @classmethod
     @validate_type(('dsets', (Set, DataSet, tuple, list), DataSetTypeError),
@@ -3343,7 +3322,6 @@ class Mat(DataCarrier):
     INSERT_VALUES = "INSERT_VALUES"
     ADD_VALUES = "ADD_VALUES"
 
-    _globalcount = 0
     _modes = [WRITE, INC]
 
     @validate_type(('sparsity', Sparsity, SparsityTypeError),
@@ -3354,9 +3332,8 @@ class Mat(DataCarrier):
         self.rcomm = sparsity.rcomm
         self.comm = sparsity.comm
         self._datatype = np.dtype(dtype)
-        self._name = name or "mat_%d" % Mat._globalcount
+        self._name = name or "mat_#x%x" % id(self)
         self.assembly_state = Mat.ASSEMBLED
-        Mat._globalcount += 1
 
     @validate_in(('access', _modes, ModeValueError))
     def __call__(self, access, path, lgmaps=None, unroll_map=False):
