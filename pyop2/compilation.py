@@ -343,6 +343,7 @@ Compile log in %s
 Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
                     # Atomically ensure soname exists
                     os.rename(tmpname, soname)
+                    print(soname, "overwritten!")
             # Wait for compilation to complete
             self.comm.barrier()
             # Load resulting library
