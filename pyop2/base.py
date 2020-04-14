@@ -521,6 +521,26 @@ class Set(object):
         """Return None (not an :class:`ExtrudedSet`)."""
         return None
 
+    def _set_operation_pre_check(self, other):
+        if self is not other._superset:
+            raise TypeError("Superset mismatch: %s is not %s" % (self, other._superset))
+
+    def intersection(self, other):
+        self._set_operation_pre_check(other)
+        return type(other)(self, np.intersect1d(np.asarray(range(self.total_size), dtype=IntType), other._indices))
+
+    def union(self, other):
+        self._set_operation_pre_check(other)
+        return type(other)(self, np.union1d(np.asarray(range(self.total_size), dtype=IntType), other._indices))
+
+    def difference(self, other):
+        self._set_operation_pre_check(other)
+        return type(other)(self, np.setdiff1d(np.asarray(range(self.total_size), dtype=IntType), other._indices))
+
+    def symmetric_difference(self, other):
+        self._set_operation_pre_check(other)
+        return type(other)(self, np.setxor1d(np.asarray(range(self.total_size), dtype=IntType), other._indices))
+
 
 class GlobalSet(Set):
 
@@ -780,6 +800,28 @@ class Subset(ExtrudedSet):
     def _argtype(self):
         """Ctypes argtype for this :class:`Subset`"""
         return ctypes.c_voidp
+
+    def _set_operation_pre_check(self, other):
+        if type(other) is not type(self):
+            raise TypeError("Set operation is performed only between two objects of the same type: %s and %s are provided." % (type(self), type(other)))
+        if self._superset is not other._superset:
+            raise TypeError("Superset mismatch: %s is not %s" % (self._superset, other._superset))
+
+    def intersection(self, other):
+        self._set_operation_pre_check(other)
+        return type(self)(self._superset, np.intersect1d(self._indices, other._indices))
+
+    def union(self, other):
+        self._set_operation_pre_check(other)
+        return type(self)(self._superset, np.union1d(self._indices, other._indices))
+
+    def difference(self, other):
+        self._set_operation_pre_check(other)
+        return type(self)(self._superset, np.setdiff1d(self._indices, other._indices))
+
+    def symmetric_difference(self, other):
+        self._set_operation_pre_check(other)
+        return type(self)(self._superset, np.setxor1d(self._indices, other._indices))
 
 
 class SetPartition(object):
