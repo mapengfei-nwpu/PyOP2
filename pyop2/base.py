@@ -1575,7 +1575,7 @@ class Dat(DataCarrier, _EmptyDataMixin):
             i = p.Variable("i")
             insn = loopy.Assignment(x.index(i), 0, within_inames=frozenset(["i"]))
             data = loopy.GlobalArg("dat", dtype=self.dtype, shape=(self.cdim,), target=TARGET)
-            knl = loopy.make_function([domain], [insn], [data], name="zero", target=TARGET)
+            knl = loopy.make_function([domain], [insn], [data], name="zero")
 
             knl = _make_object('Kernel', knl, 'zero')
             loop = _make_object('ParLoop', knl,
