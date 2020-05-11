@@ -32,6 +32,7 @@ from pyop2.codegen.representation import (Index, FixedIndex, RuntimeIndex,
 from pyop2.codegen.representation import (PackInst, UnpackInst, KernelInst)
 from pytools import ImmutableRecord
 
+TARGET=loopy.target.c.CTarget()
 
 class Bag(object):
     pass
@@ -426,7 +427,7 @@ def generate(builder, wrapper_name=None):
     # sometimes masks are not used, but we still need to create the function arguments
     for i, arg in enumerate(parameters.wrapper_arguments):
         if parameters.kernel_data[i] is None:
-            arg = loopy.GlobalArg(arg.name, dtype=arg.dtype, shape=arg.shape)
+            arg = loopy.GlobalArg(arg.name, dtype=arg.dtype, shape=arg.shape, target=TARGET)
             parameters.kernel_data[i] = arg
 
     if wrapper_name is None:
@@ -697,11 +698,11 @@ def expression_argument(expr, parameters):
     shape = expr.shape
     dtype = expr.dtype
     if shape == ():
-        arg = loopy.ValueArg(name, dtype=dtype)
+        arg = loopy.ValueArg(name, dtype=dtype, target=TARGET)
     else:
         arg = loopy.GlobalArg(name,
                               dtype=dtype,
-                              shape=shape)
+                              shape=shape, target=TARGET)
     idx = parameters.wrapper_arguments.index(expr)
     parameters.kernel_data[idx] = arg
     return pym.Variable(name)
@@ -716,7 +717,8 @@ def expression_variable(expr, parameters):
         parameters.temporaries[name] = loopy.TemporaryVariable(name,
                                                                dtype=dtype,
                                                                shape=shape,
-                                                               address_space=loopy.auto)
+                                                               address_space=loopy.auto,
+                                                               target=TARGET)
     return pym.Variable(name)
 
 
@@ -742,7 +744,8 @@ def expression_namedliteral(expr, parameters):
                                   shape=expr.shape,
                                   address_space=loopy.AddressSpace.LOCAL,
                                   read_only=True,
-                                  initializer=expr.value)
+                                  initializer=expr.value,
+                                  target=TARGET)
     parameters.temporaries[name] = val
 
     return pym.Variable(name)
