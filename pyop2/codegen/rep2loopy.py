@@ -3,7 +3,11 @@ import numpy
 
 import loopy
 from loopy.symbolic import SubArrayRef
-from loopy.types import OpaqueType
+from loopy.expression import dtype_to_type_context
+from pymbolic.mapper.stringifier import PREC_NONE
+from pymbolic import var
+from loopy.types import NumpyType, OpaqueType
+from loopy.target.c import CTarget
 
 import islpy as isl
 import pymbolic.primitives as pym
@@ -83,6 +87,210 @@ def petsc_function_lookup(target, identifier):
     if identifier in petsc_functions:
         return PetscCallable(name=identifier)
     return None
+
+
+class INVCallable(loopy.ScalarCallable):
+    def __init__(self, name, arg_id_to_dtype=None,
+                 arg_id_to_descr=None, name_in_target=None):
+
+        super(INVCallable, self).__init__(name,
+                                          arg_id_to_dtype=arg_id_to_dtype,
+                                          arg_id_to_descr=arg_id_to_descr)
+
+        self.name = name
+        self.name_in_target = name_in_target
+
+    def with_types(self, arg_id_to_dtype, kernel, callables_table):
+        for i in range(len(arg_id_to_dtype)):
+            if arg_id_to_dtype.get(i) is None:
+                # the types provided aren't mature enough to specialize the
+                # callable
+                return (self.copy(arg_id_to_dtype=arg_id_to_dtype),
+                        callables_table)
+
+        mat_dtype = arg_id_to_dtype[0].numpy_dtype
+        name_in_target = "inverse"
+
+        return (self.copy(name_in_target=name_in_target,
+                          arg_id_to_dtype={-1: NumpyType(mat_dtype, target=loopy.CTarget()), 0: NumpyType(mat_dtype, target=loopy.CTarget()), 1: NumpyType(numpy.int32, target=loopy.CTarget())}),
+                callables_table)
+
+    def emit_call_insn(self, insn, target, expression_to_code_mapper):
+        assert self.is_ready_for_codegen()
+
+        assert isinstance(insn, loopy.CallInstruction)
+
+        parameters = insn.expression.parameters
+
+        parameters = list(parameters)
+        par_dtypes = [self.arg_id_to_dtype[i] for i, _ in enumerate(parameters)]
+
+        parameters.append(insn.assignees[-1])
+        par_dtypes.append(self.arg_id_to_dtype[0])
+
+        mat_descr = self.arg_id_to_descr[0]
+        arg_c_parameters = [
+            expression_to_code_mapper(
+                par,
+                PREC_NONE,
+                dtype_to_type_context(target, par_dtype),
+                par_dtype
+            ).expr
+            if isinstance(par, SubArrayRef) else
+            expression_to_code_mapper(
+                par,
+                PREC_NONE,
+                dtype_to_type_context(target, par_dtype),
+                par_dtype
+            ).expr
+            for par, par_dtype in zip(parameters, par_dtypes)
+        ]
+        c_parameters = []
+        c_parameters.insert(0, arg_c_parameters[-1])  # t1
+        c_parameters.insert(1, arg_c_parameters[0])  # t0
+        c_parameters.insert(2, numpy.int32(mat_descr.shape[0]))  # n
+        return var(self.name_in_target)(*c_parameters), False
+
+    def generate_preambles(self, target):
+        assert isinstance(target, CTarget)
+        inverse_preamble = """
+            #include <string.h>
+            #include <stdio.h>
+            #include <stdlib.h>
+            #ifndef Inverse_HPP
+            #define Inverse_HPP
+            #define BUF_SIZE 30
+
+            static PetscBLASInt ipiv_buffer[BUF_SIZE];
+            static PetscScalar work_buffer[BUF_SIZE*BUF_SIZE];
+            static void inverse(PetscScalar* restrict Aout, const PetscScalar* restrict A, const PetscBLASInt N)
+            {
+                PetscBLASInt info;
+                PetscBLASInt *ipiv = N <= BUF_SIZE ? ipiv_buffer : malloc(N*sizeof(*ipiv));
+                PetscScalar *Awork = N <= BUF_SIZE ? work_buffer : malloc(N*N*sizeof(*Awork));
+                memcpy(Aout,A,N*N*sizeof(PetscScalar));
+                LAPACKgetrf_(&N,&N,Aout,&N,ipiv,&info);
+                if(info==0)
+                    LAPACKgetri_(&N,Aout,&N,ipiv,Awork,&N,&info);
+                if(info!=0)
+                    fprintf(stderr,\"Getri throws nonzero info.\");
+                if ( N > BUF_SIZE ) {
+                    free(Awork);
+                    free(ipiv);
+                }
+            }
+            #endif
+        """
+        yield("inverse", "#include <petscsystypes.h>\n#include <petscblaslapack.h>\n"+inverse_preamble)
+        return
+
+
+def inv_fn_lookup(target, identifier):
+    if identifier == 'inv':
+        return INVCallable(name='inv')
+    else:
+        return None
+
+
+class SolveCallable(loopy.ScalarCallable):
+    def __init__(self, name, arg_id_to_dtype=None,
+                 arg_id_to_descr=None, name_in_target=None):
+
+        super(SolveCallable, self).__init__(name,
+                                            arg_id_to_dtype=arg_id_to_dtype,
+                                            arg_id_to_descr=arg_id_to_descr)
+
+        self.name = name
+        self.name_in_target = name_in_target
+
+    def with_types(self, arg_id_to_dtype, kernel, callables_table):
+        for i in range(len(arg_id_to_dtype)):
+            if arg_id_to_dtype.get(i) is None:
+                # the types provided aren't mature enough to specialize the
+                # callable
+                return (self.copy(arg_id_to_dtype=arg_id_to_dtype),
+                        callables_table)
+
+        mat_dtype = arg_id_to_dtype[0].numpy_dtype
+        name_in_target = "solve"
+
+        return (self.copy(name_in_target=name_in_target,
+                arg_id_to_dtype={-1: NumpyType(mat_dtype, target=loopy.CTarget()), 0: NumpyType(mat_dtype, target=loopy.CTarget()), 1: NumpyType(mat_dtype, target=loopy.CTarget()), 2: NumpyType(numpy.int32, target=loopy.CTarget())}),
+                callables_table)
+
+    def emit_call_insn(self, insn, target, expression_to_code_mapper):
+        assert self.is_ready_for_codegen()
+        assert isinstance(insn, loopy.CallInstruction)
+
+        parameters = insn.expression.parameters
+
+        if type(parameters) != list:
+            parameters = list(parameters)
+        par_dtypes = [self.arg_id_to_dtype[i] for i, _ in enumerate(parameters)]
+
+        parameters.append(insn.assignees[0])
+        par_dtypes.append(self.arg_id_to_dtype[1])
+        mat_descr_A = self.arg_id_to_descr[0]
+
+        arg_c_parameters = [
+            expression_to_code_mapper(
+                par,
+                PREC_NONE,
+                dtype_to_type_context(target, par_dtype),
+                par_dtype
+            ).expr
+            if isinstance(par, SubArrayRef) else
+            expression_to_code_mapper(
+                par,
+                PREC_NONE,
+                dtype_to_type_context(target, par_dtype),
+                par_dtype
+            ).expr
+            for par, par_dtype in zip(parameters, par_dtypes)
+        ]
+        c_parameters = []
+        c_parameters.insert(0, arg_c_parameters[-1])  # out
+        c_parameters.insert(1, arg_c_parameters[0])  # A
+        c_parameters.insert(2, arg_c_parameters[1])  # B
+        c_parameters.insert(3, mat_descr_A.shape[1])  # n
+        return var(self.name_in_target)(*c_parameters), False
+
+    def generate_preambles(self, target):
+        assert isinstance(target, CTarget)
+        code = """#include <string.h>
+            #include <stdio.h>
+            #include <stdlib.h>
+            #ifndef Solve_HPP
+            #define Solve_HPP
+            #define BUF_SIZE 30
+
+            static PetscBLASInt ipiv_buffer[BUF_SIZE];
+            static void solve(PetscScalar* restrict out, const PetscScalar* restrict A, PetscScalar* restrict B, PetscBLASInt N)
+            {
+                PetscBLASInt info;
+                PetscBLASInt *ipiv = N <= BUF_SIZE ? ipiv_buffer : malloc(N*sizeof(*ipiv));
+                memcpy(out,B,N*sizeof(PetscScalar));
+                PetscBLASInt NRHS;
+                NRHS=1;
+                LAPACKgesv_(&N,&NRHS,A,&N,ipiv,out,&N,&info);
+                if(info!=0)
+                    fprintf(stderr,\"Gesv throws nonzero info.\");
+                if ( N > BUF_SIZE ) {
+                    free(ipiv);
+                }
+            }
+            #endif
+        """
+
+        yield("solve", "#include <petscsystypes.h>\n#include <petscblaslapack.h>\n"+code)
+        return
+
+
+def sol_fn_lookup(target, identifier):
+    if identifier == 'solve':
+        return SolveCallable(name='solve')
+    else:
+        return None
 
 
 class _PreambleGen(ImmutableRecord):
@@ -460,7 +668,7 @@ def generate(builder, wrapper_name=None):
     # register kernel
     kernel = builder.kernel
     headers = set(kernel._headers)
-    headers = headers | set(["#include <math.h>"])
+    headers = headers | set(["#include <math.h>"]) | set(["#include <stdint.h>"])
     preamble = "\n".join(sorted(headers))
 
     from coffee.base import Node
