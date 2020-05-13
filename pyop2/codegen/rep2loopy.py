@@ -36,6 +36,8 @@ from pyop2.codegen.representation import (Index, FixedIndex, RuntimeIndex,
 from pyop2.codegen.representation import (PackInst, UnpackInst, KernelInst)
 from pytools import ImmutableRecord
 
+TARGET=loopy.target.c.CTarget()
+
 
 class Bag(object):
     pass
