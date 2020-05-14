@@ -183,7 +183,7 @@ class INVCallable(loopy.ScalarCallable):
             }
             #endif
         """
-        yield("inverse", "#include <petscsystypes.h>\n#include <petscblaslapack.h>\n"+inverse_preamble)
+        yield("inverse", "#include <petscsys.h>\n#include <petscblaslapack.h>\n"+inverse_preamble)
         return
 
 
@@ -284,7 +284,7 @@ class SolveCallable(loopy.ScalarCallable):
             #endif
         """
 
-        yield("solve", "#include <petscsystypes.h>\n#include <petscblaslapack.h>\n"+code)
+        yield("solve", "#include <petscsys.h>\n#include <petscblaslapack.h>\n"+code)
         return
 
 
